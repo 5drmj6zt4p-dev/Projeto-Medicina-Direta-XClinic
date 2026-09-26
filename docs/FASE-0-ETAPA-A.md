@@ -141,7 +141,13 @@ Aperte **Ctrl+C** (ou Ctrl+Break) no terminal do gravador. Ele fecha as conexõe
 4. Exames → Laudo, no 1º nível (atendimentos, "Registros em Aberto x de y", "PDF Assinado x de y", cadeado) e no 2º nível (laudos individuais).
 5. Abrir um laudo **assinado** e sair por "Voltar". Depois, "Imprimir" com "LAUDO (PDF)", para ver se o PDF entregue é o original assinado ou uma nova impressão.
 6. Exames → Resultado e Anexo.
-7. Mapa de requisições: a **fonte primária** é o `rede-resumo.json` do gravador com `--rede` (item 4.1), que separa os POSTs por (método, caminho, `nmgp_opcao`). Anotar qual ação de tela gerou cada tupla nova. O HAR manual fica **opcional**, só para investigar uma requisição que o resumo não explique (por exemplo, `corpo_fora_do_evento` ou parâmetro de operação com outro nome): DevTools (F12) → Network → "Preserve log", exportar para `%LOCALAPPDATA%\FluxoExames\captures\AAAA-MM-DD\`. O HAR contém corpos e cookies. Trate-o como captura com PHI e apague-o depois de usar.
+7. Mapa de requisições: a **fonte primária** é o `rede-resumo.json` do gravador com `--rede` (item 4.1), que separa os POSTs por (método, caminho, `nmgp_opcao`).
+   - **Encerre o gravador com Ctrl+C, nunca por kill.** Só o Ctrl+C grava o resumo com o status de cada tupla associado pelo `requestId`. Na sessão de 26/09 houve kill, e o resumo reconstruído a partir do jsonl ficou com contagens dobradas e com o status das tuplas `igual` e `ajax_save_ancor` numa tupla gêmea vazia (ver `FASE-0-ETAPA-B.md`, item 1).
+   - A ação de tela que gerou cada tupla **não precisa ser anotada à mão**. Ela sai do cruzamento do horário (`ts`) do `rede-AAAA-MM-DD.jsonl` com as linhas `CAPTURA` do `sessao.log` e os quadros de cada snapshot. Basta o Ivson dizer em voz alta, ou na Sala, a sequência que vai seguir.
+   - O gravador guarda só `nmgp_opcao`. Nos endpoints `blank_*_funcoes`, a operação real vai no campo `funcao`, que hoje é inferido do JS das capturas.
+   - O HAR manual fica **opcional**, só para investigar uma requisição que o resumo não explique (por exemplo, `corpo_fora_do_evento`, parâmetro de operação com outro nome ou o valor de `funcao`): DevTools (F12) → Network → "Preserve log", exportar para `%LOCALAPPDATA%\FluxoExames\captures\AAAA-MM-DD\`. O HAR contém corpos e cookies. Trate-o como captura com PHI e apague-o depois de usar.
+
+   Na sessão de 26/09, os itens 3 (Questionário), 5 (laudo assinado e Imprimir), 6 (Resultado e Anexo) e 8 (sessão simultânea) não foram executados. Eles ficam para a próxima sessão da Fase 0, junto com a validação de `nmgp_opcao=igual` (`FASE-0-ETAPA-B.md`, itens 6.2 e 7).
 8. Teste de **sessão simultânea**: com o perfil dedicado logado, o Ivson usa o MD no Chrome pessoal. Anotar se alguma das sessões cai.
 
 - [ ] **Nunca** clicar em Assinar, ASSINAR PDF, Finalizar e Assinar, Salvar, Excluir, Criar, Enviar/Enviar Por, Solicitar ou Ações. Isso vale também para o Ivson durante a gravação.

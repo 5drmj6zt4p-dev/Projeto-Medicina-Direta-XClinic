@@ -50,7 +50,7 @@ No MD, o caminho de leitura passa ao lado de ações de escrita e de assinatura.
 2. **Textos de botão:** o coletor nunca clica em elemento cujo texto case com a lista negra (Assinar, Finalizar, Salvar, Excluir, Enviar…).
 3. **POST:** todo `POST` é bloqueado, salvo os que estão numa lista branca explícita. Cada item dessa lista foi observado e demonstrado como leitura na Fase 0.
 
-As listas ficam em `fluxo_exames/guard.py`. Hoje são **PLACEHOLDER**; os valores reais saem da Fase 0, Etapa B.
+As listas ficam em `fluxo_exames/guard.py` (versão 1, preenchida com a sessão da Etapa B; evidências em `docs/FASE-0-ETAPA-B.md`). Além das 3 camadas, a guarda bloqueia, em qualquer método, endpoints de escrita e assinatura e parâmetros de operação do ScriptCase. Abrir o formulário do laudo (`nmgp_opcao=igual`) está bloqueado até ser validado na próxima sessão da Fase 0.
 
 ## Privacidade
 
@@ -64,14 +64,19 @@ As listas ficam em `fluxo_exames/guard.py`. Hoje são **PLACEHOLDER**; os valore
 
 ```
 fluxo_exames/        pacote do app (esqueleto)
-  guard.py           guarda de somente leitura (listas PLACEHOLDER)
+  guard.py           guarda de somente leitura (versão 1)
   state.py           estados da máquina de estados por item
 scripts/
   gravador_passivo.py  Fase 0: grava passivamente as navegações do Chrome dedicado
                        (--rede: mapa de requisições por método, caminho e nmgp_opcao)
+tests/
+  test_guard.py      testes da guarda (dados sintéticos)
 docs/
   FASE-0-ETAPA-A.md  perfil dedicado, uso do gravador e checklist da Etapa B
+  FASE-0-ETAPA-B.md  mapa de leitura do MD e classificação dos POSTs
 ```
+
+Testes: `python -m pytest`.
 
 ## Instalação
 
