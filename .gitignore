@@ -1,0 +1,13 @@
+# Dados e capturas (podem conter dados de paciente) — nunca versionar
+captures/
+*.db
+*.sqlite
+chrome-profile/
+
+# Segredos
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
