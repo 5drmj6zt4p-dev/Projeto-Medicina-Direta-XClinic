@@ -30,6 +30,15 @@ método e o endpoint pareceriam permitidos.
 Toda requisição bloqueada é registrada. Uma tentativa de escrita registrada
 conta como erro crítico no modo sombra.
 
+Fonte do mapa de operações: o ``rede-resumo.json`` produzido por
+``scripts/gravador_passivo.py --rede`` durante a Etapa B (ver
+``docs/FASE-0-ETAPA-A.md``, item 4.1). Ele lista as tuplas distintas
+(método, caminho, ``nmgp_opcao``) observadas, com contagem e status. Cada
+entrada de ``POSTS_PERMITIDOS`` e de ``OPERACOES_SCRIPTCASE_BLOQUEADAS`` deve
+corresponder a uma tupla desse resumo, associada à ação de tela que a gerou.
+O arquivo fica na pasta local de capturas e não entra no repositório. Para
+cá vêm só caminho e valor de operação, sem query nem identificador de paciente.
+
 ESTADO: esqueleto. As listas abaixo são PLACEHOLDER e as funções ainda não
 estão implementadas. Os valores reais saem do mapeamento da Fase 0, Etapa B.
 """
@@ -77,7 +86,7 @@ TEXTOS_BOTAO_BLOQUEADOS = (
 # PLACEHOLDER — camada 3. Lista branca de POSTs demonstrados como leitura.
 # Formato previsto de cada entrada (preencher na Etapa B):
 #   {"url_regex": r"...", "parametros_obrigatorios": {"nmgp_opcao": "..."},
-#    "evidencia": "captura/tela que demonstrou ser leitura"}
+#    "evidencia": "tupla do rede-resumo.json + tela que demonstrou ser leitura"}
 POSTS_PERMITIDOS = ()
 
 # PLACEHOLDER — valores de operação do ScriptCase que indicam gravação.

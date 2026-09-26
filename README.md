@@ -68,6 +68,7 @@ fluxo_exames/        pacote do app (esqueleto)
   state.py           estados da máquina de estados por item
 scripts/
   gravador_passivo.py  Fase 0: grava passivamente as navegações do Chrome dedicado
+                       (--rede: mapa de requisições por método, caminho e nmgp_opcao)
 docs/
   FASE-0-ETAPA-A.md  perfil dedicado, uso do gravador e checklist da Etapa B
 ```

@@ -45,7 +45,7 @@ python -m pip install -r requirements.txt   # uma vez
 python scripts\gravador_passivo.py
 ```
 
-Opções: `--porta 9222` (padrão), `--saida PASTA` (padrão `%LOCALAPPDATA%\FluxoExames\captures`) e `--espera 1.5`. A espera é o número de segundos sem novos eventos antes de tirar o snapshot, o que agrupa navegações em rajada.
+Opções: `--porta 9222` (padrão), `--saida PASTA` (padrão `%LOCALAPPDATA%\FluxoExames\captures`), `--espera 1.5` e `--rede` (desligada por padrão; ver item 4.1). A espera é o número de segundos sem novos eventos antes de tirar o snapshot, o que agrupa navegações em rajada.
 
 Se o Chrome não estiver com a porta aberta, o gravador sai com código 2 e mostra onde está a instrução.
 
@@ -70,16 +70,15 @@ Detalhes que importam no ScriptCase:
 O gravador **não** captura:
 
 - valores digitados em campos (o outerHTML só guarda atributos);
-- rede, cabeçalhos ou corpo de POST;
+- cabeçalhos, nem corpo de requisição ou de resposta;
+- requisições de rede, a menos que se use `--rede` (item 4.1);
 - PDFs;
 - conteúdo de shadow DOM.
-
-Para mapear as requisições, use o DevTools (item 6, passo 7).
 
 **Garantias de passividade:**
 
 - usa só `websocket-client` puro, porque o Playwright injeta scripts de apoio ao conectar;
-- aceita só os comandos CDP `Page.enable`, `DOM.getDocument`, `DOM.getOuterHTML` e `DOM.disable`, e recusa qualquer outro antes de enviar;
+- aceita só os comandos CDP `Page.enable`, `DOM.getDocument`, `DOM.getOuterHTML` e `DOM.disable`, mais `Network.enable` quando `--rede` está ligada. Recusa qualquer outro antes de enviar;
 - não roda JavaScript na página, não clica, não digita e não navega;
 - não abre nem fecha abas: usa só `GET /json/version` e `GET /json/list`.
 
@@ -91,9 +90,37 @@ O comportamento foi testado com páginas sintéticas locais, incluindo iframes a
 - Nenhuma captura entra no repositório sem ter sido anonimizada antes. `captures/` também está no `.gitignore`, como segunda barreira.
 - Pré-requisito: BitLocker ativo no C: antes da Etapa B.
 
+### 4.1 Opção `--rede`: mapa de operações do ScriptCase
+
+```powershell
+python scripts\gravador_passivo.py --rede
+```
+
+**Para que serve.** A guarda de `fluxo_exames/guard.py` nega todo POST que não esteja em `POSTS_PERMITIDOS` e bloqueia as operações de gravação em `OPERACOES_SCRIPTCASE_BLOQUEADAS`. No ScriptCase, o que diferencia uma leitura de uma gravação costuma ser o parâmetro `nmgp_opcao`. Com `--rede`, o gravador observa as requisições enquanto o Ivson navega e produz o mapa (método, caminho, `nmgp_opcao`) que alimenta essas duas listas.
+
+**Como funciona.** Em cada aba ou iframe observado, o gravador envia `Network.enable` e processa só três eventos: `Network.requestWillBeSent`, `Network.responseReceived` e `Network.loadingFailed`. Os demais eventos de rede são ignorados, inclusive os que trazem cookies e cabeçalhos extras. Ao ligar o domínio, o gravador zera os buffers de conteúdo do Chrome para essa conexão. É só observação: nenhuma requisição é alterada, bloqueada ou repetida.
+
+**O que grava**, em `captures\rede-AAAA-MM-DD.jsonl` (uma linha JSON por evento):
+
+| Evento | Campos |
+|---|---|
+| `requisicao` | horário, aba, `requestId`, método, URL completa, tipo do recurso (`Document`, `XHR`, `Fetch`…), `status_redirecionamento` se veio de um redirecionamento, `nmgp_opcao_url` e `nmgp_opcao_corpo` se houver, `tipo_corpo` (só o MIME) quando há corpo |
+| `resposta` | horário, `requestId`, método, URL, tipo, status HTTP |
+| `falha` | horário, `requestId`, método, URL, tipo, erro de rede (`net::…`), se foi cancelada |
+
+O valor de `nmgp_opcao` é lido da query string da URL e do corpo de POST `application/x-www-form-urlencoded` que já vem no próprio evento. Do corpo, **só o valor dessa chave** é guardado; o resto é descartado na memória. Corpo JSON, multipart ou outro formato não é analisado: aparece só `tipo_corpo`. Um corpo grande demais para vir no evento (mais de 64 KB) aparece com `corpo_fora_do_evento: true`, e o gravador não vai buscá-lo. Em URLs `data:` fica só o tipo, sem o conteúdo.
+
+**O que NUNCA grava:** corpo de requisição (fora o valor de `nmgp_opcao`), corpo de resposta, cabeçalhos, cookies. O gravador não envia `Network.getResponseBody`, `Network.getRequestPostData` nem qualquer outro comando que busque conteúdo. Todos são recusados pela lista de comandos permitidos.
+
+**Resumo ao parar.** No Ctrl+C, o gravador imprime as tuplas distintas **(método, caminho, `nmgp_opcao`)** desta sessão, com contagem, e soma a sessão ao `captures\rede-resumo.json`. Esse arquivo acumula todas as sessões gravadas com `--rede` na mesma pasta; para recomeçar do zero, apague-o. Cada tupla traz ainda os status HTTP observados (`falha` para erro de rede) e as origens (`https://host`). O caminho não inclui query. **Esse resumo é a matéria-prima de `POSTS_PERMITIDOS` e `OPERACOES_SCRIPTCASE_BLOQUEADAS`.**
+
+**Privacidade.** No MD, URLs podem conter identificadores de paciente ou de atendimento (na query). Por isso o `rede-*.jsonl` recebe a mesma proteção das capturas HTML: fica só em `%LOCALAPPDATA%\FluxoExames\captures` e nunca vai para o repositório, a Sala ou a nuvem. O `rede-resumo.json` não tem query, mas deve ser revisado antes de qualquer trecho dele ser copiado para `guard.py`.
+
+O comportamento foi testado com Chrome descartável e servidor sintético local. O teste cobriu um formulário POST com `nmgp_opcao` na query e no corpo, fetch urlencoded, JSON e multipart, corpo acima de 64 KB, 404, redirecionamento 302 e conexão recusada. Nenhum marcador colocado nos corpos de requisição ou de resposta apareceu nos arquivos gravados. O servidor recebeu só as requisições da própria página; nenhuma veio do gravador.
+
 ## 5. Parar
 
-Aperte **Ctrl+C** (ou Ctrl+Break) no terminal do gravador. Ele fecha as conexões, grava `FIM` no log e mostra o total de capturas e erros. Depois feche o Chrome do projeto, para fechar a porta 9222.
+Aperte **Ctrl+C** (ou Ctrl+Break) no terminal do gravador. Ele fecha as conexões, grava `FIM` no log e mostra o total de capturas e erros. Com `--rede`, antes disso ele imprime o resumo de rede e salva `rede-resumo.json`. Depois feche o Chrome do projeto, para fechar a porta 9222.
 
 ## 6. Checklist da Etapa B — mapeamento com o Ivson presente
 
@@ -104,7 +131,7 @@ Aperte **Ctrl+C** (ou Ctrl+Break) no terminal do gravador. Ele fecha as conexõe
 - [ ] BitLocker ativo no C: (`manage-bde -status C:` como administrador).
 - [ ] As capturas antigas com CPF já saíram do OneDrive.
 - [ ] Chrome do projeto aberto conforme o item 2. O Ivson faz o login no MD à mão.
-- [ ] Gravador rodando (item 3) e mostrando `Conectado`.
+- [ ] Gravador rodando **com `--rede`** (itens 3 e 4.1) e mostrando `Conectado`.
 
 **Durante** — quem navega é o **Ivson**. O agente só observa.
 
@@ -114,7 +141,7 @@ Aperte **Ctrl+C** (ou Ctrl+Break) no terminal do gravador. Ele fecha as conexõe
 4. Exames → Laudo, no 1º nível (atendimentos, "Registros em Aberto x de y", "PDF Assinado x de y", cadeado) e no 2º nível (laudos individuais).
 5. Abrir um laudo **assinado** e sair por "Voltar". Depois, "Imprimir" com "LAUDO (PDF)", para ver se o PDF entregue é o original assinado ou uma nova impressão.
 6. Exames → Resultado e Anexo.
-7. Para mapear requisições: DevTools (F12) → Network → "Preserve log". Ao final, exportar o HAR para `%LOCALAPPDATA%\FluxoExames\captures\AAAA-MM-DD\`. É a fonte para separar os POSTs de leitura das operações de gravação (`nmgp_opcao` e similares).
+7. Mapa de requisições: a **fonte primária** é o `rede-resumo.json` do gravador com `--rede` (item 4.1), que separa os POSTs por (método, caminho, `nmgp_opcao`). Anotar qual ação de tela gerou cada tupla nova. O HAR manual fica **opcional**, só para investigar uma requisição que o resumo não explique (por exemplo, `corpo_fora_do_evento` ou parâmetro de operação com outro nome): DevTools (F12) → Network → "Preserve log", exportar para `%LOCALAPPDATA%\FluxoExames\captures\AAAA-MM-DD\`. O HAR contém corpos e cookies. Trate-o como captura com PHI e apague-o depois de usar.
 8. Teste de **sessão simultânea**: com o perfil dedicado logado, o Ivson usa o MD no Chrome pessoal. Anotar se alguma das sessões cai.
 
 - [ ] **Nunca** clicar em Assinar, ASSINAR PDF, Finalizar e Assinar, Salvar, Excluir, Criar, Enviar/Enviar Por, Solicitar ou Ações. Isso vale também para o Ivson durante a gravação.
@@ -125,8 +152,8 @@ Aperte **Ctrl+C** (ou Ctrl+Break) no terminal do gravador. Ele fecha as conexõe
 - [ ] `git status` limpo neste repositório: nenhuma captura dentro dele.
 - [ ] Produzir, **sem dado de paciente**:
   - mapa de telas e seletores;
-  - lista dos POSTs demonstrados como leitura (vira `POSTS_PERMITIDOS` em `fluxo_exames/guard.py`);
-  - lista das operações de gravação (vira `OPERACOES_SCRIPTCASE_BLOQUEADAS`);
+  - lista dos POSTs demonstrados como leitura, a partir do `rede-resumo.json` (vira `POSTS_PERMITIDOS` em `fluxo_exames/guard.py`);
+  - lista das operações de gravação, a partir do `rede-resumo.json` (vira `OPERACOES_SCRIPTCASE_BLOQUEADAS`);
   - textos de botão encontrados;
   - significado de cadeado, "PDF Assinado x de y" e "Registros em Aberto";
   - resultado do teste de sessão simultânea;
