@@ -18,7 +18,7 @@ A arquitetura foi aprovada na Sala de Reunião (Hermes, Claude e Codex) e selada
 
 | Componente | Função |
 |---|---|
-| Coletor MD | Playwright num perfil Chrome **dedicado**. Lê o DOM, com a guarda de somente leitura descrita abaixo. Obtém o PDF por "Imprimir" e registra a proveniência. |
+| Coletor MD | Playwright num perfil Chrome **dedicado**. Lê o DOM, com a guarda de somente leitura descrita abaixo. Lê o texto do laudo no formulário e registra a proveniência. O PDF por "Imprimir" está bloqueado desde a Etapa C (ver `docs/FASE-0-ETAPA-C.md`). |
 | Coletor XClinic | Só SELECTs parametrizados, com login SQL somente leitura. Se o XClinic estiver inacessível, a consulta entra numa fila offline. |
 | Estado | SQLite com uma máquina de estados por item (`fluxo_exames/state.py`), checkpoints por documento e cache por versão/hash. |
 | Taxonomia | YAML versionado que classifica os títulos de exame. Título desconhecido não exclui antecedente. |
@@ -50,7 +50,7 @@ No MD, o caminho de leitura passa ao lado de ações de escrita e de assinatura.
 2. **Textos de botão:** o coletor nunca clica em elemento cujo texto case com a lista negra (Assinar, Finalizar, Salvar, Excluir, Enviar…).
 3. **POST:** todo `POST` é bloqueado, salvo os que estão numa lista branca explícita. Cada item dessa lista foi observado e demonstrado como leitura na Fase 0.
 
-As listas ficam em `fluxo_exames/guard.py` (versão 1, preenchida com a sessão da Etapa B; evidências em `docs/FASE-0-ETAPA-B.md`). Além das 3 camadas, a guarda bloqueia, em qualquer método, endpoints de escrita e assinatura e parâmetros de operação do ScriptCase. Abrir o formulário do laudo (`nmgp_opcao=igual`) está bloqueado até ser validado na próxima sessão da Fase 0.
+As listas ficam em `fluxo_exames/guard.py` (versão 2, preenchida com as sessões das Etapas B e C; evidências em `docs/FASE-0-ETAPA-B.md` e `docs/FASE-0-ETAPA-C.md`). Além das 3 camadas, a guarda bloqueia, em qualquer método, endpoints de escrita, assinatura, impressão e log e parâmetros de operação do ScriptCase. Abrir o formulário do laudo (`nmgp_opcao=igual`) foi validado na Etapa C e está liberado só nesse caminho. O PDF do laudo ("Imprimir") e os formulários de Resultado e de Evolução continuam bloqueados.
 
 ## Privacidade
 
@@ -64,16 +64,18 @@ As listas ficam em `fluxo_exames/guard.py` (versão 1, preenchida com a sessão 
 
 ```
 fluxo_exames/        pacote do app (esqueleto)
-  guard.py           guarda de somente leitura (versão 1)
+  guard.py           guarda de somente leitura (versão 2)
   state.py           estados da máquina de estados por item
 scripts/
   gravador_passivo.py  Fase 0: grava passivamente as navegações do Chrome dedicado
                        (--rede: mapa de requisições por método, caminho, nmgp_opcao e funcao)
+  repassar_rede.py     repassa um rede-*.jsonl gravado pela guarda (sem acessar o MD)
 tests/
   test_guard.py      testes da guarda (dados sintéticos)
 docs/
   FASE-0-ETAPA-A.md  perfil dedicado, uso do gravador e checklist da Etapa B
-  FASE-0-ETAPA-B.md  mapa de leitura do MD e classificação dos POSTs
+  FASE-0-ETAPA-B.md  mapa de leitura do MD e classificação dos POSTs (sessões B e C)
+  FASE-0-ETAPA-C.md  relatório da sessão 2: lacunas, guarda v2, pendências e recomendações
 ```
 
 Testes: `python -m pytest`.
