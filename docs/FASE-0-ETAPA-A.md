@@ -96,7 +96,7 @@ O comportamento foi testado com páginas sintéticas locais, incluindo iframes a
 python scripts\gravador_passivo.py --rede
 ```
 
-**Para que serve.** A guarda de `fluxo_exames/guard.py` nega todo POST que não esteja em `POSTS_PERMITIDOS` e bloqueia as operações de gravação em `OPERACOES_SCRIPTCASE_BLOQUEADAS`. No ScriptCase, o que diferencia uma leitura de uma gravação costuma ser o parâmetro `nmgp_opcao`. Com `--rede`, o gravador observa as requisições enquanto o Ivson navega e produz o mapa (método, caminho, `nmgp_opcao`) que alimenta essas duas listas.
+**Para que serve.** A guarda de `fluxo_exames/guard.py` nega todo POST que não esteja em `POSTS_PERMITIDOS` e bloqueia as operações de gravação em `OPERACOES_SCRIPTCASE_BLOQUEADAS`. No ScriptCase, o que diferencia uma leitura de uma gravação costuma ser o parâmetro `nmgp_opcao`. Nos endpoints `blank_*_funcoes`, que são mistos (o mesmo caminho lê ou grava), a operação vai no campo `funcao`. Com `--rede`, o gravador observa as requisições enquanto o Ivson navega e produz o mapa (método, caminho, `nmgp_opcao`, `funcao`) que alimenta essas listas.
 
 **Como funciona.** Em cada aba ou iframe observado, o gravador envia `Network.enable` e processa só três eventos: `Network.requestWillBeSent`, `Network.responseReceived` e `Network.loadingFailed`. Os demais eventos de rede são ignorados, inclusive os que trazem cookies e cabeçalhos extras. Ao ligar o domínio, o gravador zera os buffers de conteúdo do Chrome para essa conexão. É só observação: nenhuma requisição é alterada, bloqueada ou repetida.
 
@@ -104,19 +104,25 @@ python scripts\gravador_passivo.py --rede
 
 | Evento | Campos |
 |---|---|
-| `requisicao` | horário, aba, `requestId`, método, URL completa, tipo do recurso (`Document`, `XHR`, `Fetch`…), `status_redirecionamento` se veio de um redirecionamento, `nmgp_opcao_url` e `nmgp_opcao_corpo` se houver, `tipo_corpo` (só o MIME) quando há corpo |
+| `requisicao` | horário, aba, `requestId`, método, URL completa, tipo do recurso (`Document`, `XHR`, `Fetch`…), `status_redirecionamento` se veio de um redirecionamento, `nmgp_opcao_url`, `nmgp_opcao_corpo`, `funcao_url` e `funcao_corpo` se houver, `tipo_corpo` (só o MIME) quando há corpo, `corpo_fora_do_evento` e `funcao_fora_do_evento` quando o corpo não veio no evento |
 | `resposta` | horário, `requestId`, método, URL, tipo, status HTTP |
 | `falha` | horário, `requestId`, método, URL, tipo, erro de rede (`net::…`), se foi cancelada |
 
-O valor de `nmgp_opcao` é lido da query string da URL e do corpo de POST `application/x-www-form-urlencoded` que já vem no próprio evento. Do corpo, **só o valor dessa chave** é guardado; o resto é descartado na memória. Corpo JSON, multipart ou outro formato não é analisado: aparece só `tipo_corpo`. Um corpo grande demais para vir no evento (mais de 64 KB) aparece com `corpo_fora_do_evento: true`, e o gravador não vai buscá-lo. Em URLs `data:` fica só o tipo, sem o conteúdo.
+Os valores de `nmgp_opcao` e de `funcao` são lidos da query string da URL e do corpo de POST `application/x-www-form-urlencoded` que já vem no próprio evento, todos do mesmo `requestWillBeSent`. Do corpo, **só os valores dessas duas chaves** são guardados; o resto é descartado na memória. Corpo JSON, multipart ou outro formato não é analisado: aparece só `tipo_corpo`. Um corpo form-urlencoded grande demais para vir no evento (mais de 64 KB) aparece com `corpo_fora_do_evento: true` e `funcao_fora_do_evento: true`: os valores do corpo ficam desconhecidos, e o gravador não vai buscá-lo. Em URLs `data:` fica só o tipo, sem o conteúdo.
 
-**O que NUNCA grava:** corpo de requisição (fora o valor de `nmgp_opcao`), corpo de resposta, cabeçalhos, cookies. O gravador não envia `Network.getResponseBody`, `Network.getRequestPostData` nem qualquer outro comando que busque conteúdo. Todos são recusados pela lista de comandos permitidos.
+**O que NUNCA grava:** corpo de requisição (fora os valores de `nmgp_opcao` e `funcao`), corpo de resposta, cabeçalhos, cookies. O gravador não envia `Network.getResponseBody`, `Network.getRequestPostData` nem qualquer outro comando que busque conteúdo. Todos são recusados pela lista de comandos permitidos.
 
-**Resumo ao parar.** No Ctrl+C, o gravador imprime as tuplas distintas **(método, caminho, `nmgp_opcao`)** desta sessão, com contagem, e soma a sessão ao `captures\rede-resumo.json`. Esse arquivo acumula todas as sessões gravadas com `--rede` na mesma pasta; para recomeçar do zero, apague-o. Cada tupla traz ainda os status HTTP observados (`falha` para erro de rede) e as origens (`https://host`). O caminho não inclui query. **Esse resumo é a matéria-prima de `POSTS_PERMITIDOS` e `OPERACOES_SCRIPTCASE_BLOQUEADAS`.**
+**Resumo ao parar.** No Ctrl+C, o gravador imprime as tuplas distintas **(método, caminho, `nmgp_opcao`, `funcao`)** desta sessão, com contagem, e soma a sessão ao `captures\rede-resumo.json`. Esse arquivo acumula todas as sessões gravadas com `--rede` na mesma pasta; para recomeçar do zero, apague-o. Cada tupla traz ainda os status HTTP observados (`falha` para erro de rede) e as origens (`https://host`). O caminho não inclui query.
+
+- Em cada tupla, `nmgp_opcao` e `funcao` são o valor do corpo form-urlencoded ou, se o corpo não tem a chave, o da query.
+- `funcao: ""` quer dizer ausente, vazio ou não registrado. Um resumo gravado antes da extração de `funcao` (como o da sessão de 26/09) é lido com `funcao = ""` em todas as tuplas e continua somando normalmente. Uma tupla com `funcao: ""` não é evidência de nenhum valor de `funcao`.
+- Requisições com `corpo_fora_do_evento` ficam em tuplas à parte, marcadas `corpo_fora_do_evento: true`. Nelas, os valores são só os da query, e o do corpo é desconhecido.
+
+O resumo não decide nada: só evidencia o que foi observado. **Ele é a matéria-prima de `POSTS_PERMITIDOS`, `OPERACOES_SCRIPTCASE_BLOQUEADAS` e `FUNCOES_AJAX_BLOQUEADAS`.** Com `funcao` gravado, a guarda v2 poderá liberar os endpoints `blank_*_funcoes` por (caminho, `funcao`) direto da evidência gravada, sem deduzir o valor do JS das páginas.
 
 **Privacidade.** No MD, URLs podem conter identificadores de paciente ou de atendimento (na query). Por isso o `rede-*.jsonl` recebe a mesma proteção das capturas HTML: fica só em `%LOCALAPPDATA%\FluxoExames\captures` e nunca vai para o repositório, a Sala ou a nuvem. O `rede-resumo.json` não tem query, mas deve ser revisado antes de qualquer trecho dele ser copiado para `guard.py`.
 
-O comportamento foi testado com Chrome descartável e servidor sintético local. O teste cobriu um formulário POST com `nmgp_opcao` na query e no corpo, fetch urlencoded, JSON e multipart, corpo acima de 64 KB, 404, redirecionamento 302 e conexão recusada. Nenhum marcador colocado nos corpos de requisição ou de resposta apareceu nos arquivos gravados. O servidor recebeu só as requisições da própria página; nenhuma veio do gravador.
+O comportamento foi testado com Chrome descartável e servidor sintético local. O teste cobriu um formulário POST com `nmgp_opcao` na query e no corpo, fetch urlencoded, JSON e multipart, corpo acima de 64 KB, 404, redirecionamento 302 e conexão recusada. Na extensão para `funcao` (Etapa B.2), cobriu também POSTs com `funcao` na query, no corpo e nos dois, `funcao` vazio, corpo acima de 64 KB com `funcao` e a leitura de um resumo antigo sem `funcao`. Nenhum marcador colocado nos corpos de requisição ou de resposta apareceu nos arquivos gravados. O servidor recebeu só as requisições da própria página; nenhuma veio do gravador.
 
 ## 5. Parar
 
@@ -141,10 +147,10 @@ Aperte **Ctrl+C** (ou Ctrl+Break) no terminal do gravador. Ele fecha as conexõe
 4. Exames → Laudo, no 1º nível (atendimentos, "Registros em Aberto x de y", "PDF Assinado x de y", cadeado) e no 2º nível (laudos individuais).
 5. Abrir um laudo **assinado** e sair por "Voltar". Depois, "Imprimir" com "LAUDO (PDF)", para ver se o PDF entregue é o original assinado ou uma nova impressão.
 6. Exames → Resultado e Anexo.
-7. Mapa de requisições: a **fonte primária** é o `rede-resumo.json` do gravador com `--rede` (item 4.1), que separa os POSTs por (método, caminho, `nmgp_opcao`).
+7. Mapa de requisições: a **fonte primária** é o `rede-resumo.json` do gravador com `--rede` (item 4.1), que separa os POSTs por (método, caminho, `nmgp_opcao`, `funcao`).
    - **Encerre o gravador com Ctrl+C, nunca por kill.** Só o Ctrl+C grava o resumo com o status de cada tupla associado pelo `requestId`. Na sessão de 26/09 houve kill, e o resumo reconstruído a partir do jsonl ficou com contagens dobradas e com o status das tuplas `igual` e `ajax_save_ancor` numa tupla gêmea vazia (ver `FASE-0-ETAPA-B.md`, item 1).
    - A ação de tela que gerou cada tupla **não precisa ser anotada à mão**. Ela sai do cruzamento do horário (`ts`) do `rede-AAAA-MM-DD.jsonl` com as linhas `CAPTURA` do `sessao.log` e os quadros de cada snapshot. Basta o Ivson dizer em voz alta, ou na Sala, a sequência que vai seguir.
-   - O gravador guarda só `nmgp_opcao`. Nos endpoints `blank_*_funcoes`, a operação real vai no campo `funcao`, que hoje é inferido do JS das capturas.
+   - Nos endpoints `blank_*_funcoes`, a operação real vai no campo `funcao`. Na sessão de 26/09 ele foi inferido do JS das capturas; desde a Etapa B.2 o gravador também registra `funcao` (item 4.1).
    - O HAR manual fica **opcional**, só para investigar uma requisição que o resumo não explique (por exemplo, `corpo_fora_do_evento`, parâmetro de operação com outro nome ou o valor de `funcao`): DevTools (F12) → Network → "Preserve log", exportar para `%LOCALAPPDATA%\FluxoExames\captures\AAAA-MM-DD\`. O HAR contém corpos e cookies. Trate-o como captura com PHI e apague-o depois de usar.
 
    Na sessão de 26/09, os itens 3 (Questionário), 5 (laudo assinado e Imprimir), 6 (Resultado e Anexo) e 8 (sessão simultânea) não foram executados. Eles ficam para a próxima sessão da Fase 0, junto com a validação de `nmgp_opcao=igual` (`FASE-0-ETAPA-B.md`, itens 6.2 e 7).

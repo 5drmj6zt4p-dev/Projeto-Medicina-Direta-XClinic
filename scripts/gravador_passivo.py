@@ -32,14 +32,15 @@ só ``Network.requestWillBeSent``, ``Network.responseReceived`` e
 
 - grava em ``<saida>/rede-AAAA-MM-DD.jsonl`` horário, requestId, método, URL
   completa, tipo do recurso e status;
-- do corpo de um POST ``application/x-www-form-urlencoded`` (o ``postData``
-  que já vem no evento), extrai só o valor de ``nmgp_opcao``. O resto do
+- da query e do corpo de um POST ``application/x-www-form-urlencoded`` (o
+  ``postData`` que já vem no evento), extrai só os valores de ``nmgp_opcao``
+  e de ``funcao`` (operação dos endpoints ``blank_*_funcoes``). O resto do
   corpo é descartado na memória e nunca é gravado;
 - nunca pede conteúdo: ``Network.getResponseBody``,
   ``Network.getRequestPostData`` e afins são recusados como qualquer outro
   comando fora da lista;
 - ao parar, imprime e salva em ``<saida>/rede-resumo.json`` as tuplas
-  distintas (método, caminho, nmgp_opcao) com contagem.
+  distintas (método, caminho, nmgp_opcao, funcao) com contagem.
 
 Uso:
     python scripts/gravador_passivo.py [--porta 9222] [--saida PASTA] [--rede]
@@ -86,6 +87,7 @@ EVENTOS_REDE = frozenset({
 # maxPostDataSize garante que o postData de formulários venha no próprio evento.
 PARAMS_NETWORK_ENABLE = {"maxTotalBufferSize": 0, "maxResourceBufferSize": 0, "maxPostDataSize": 65536}
 PARAMETRO_OPERACAO = "nmgp_opcao"
+PARAMETRO_FUNCAO = "funcao"  # operação dos endpoints blank_*_funcoes
 FORMULARIO = "application/x-www-form-urlencoded"
 LIMITE_REQUISICOES_ABERTAS = 5000
 ROTAS_HTTP_PERMITIDAS = frozenset({"/json/version", "/json/list"})
@@ -146,28 +148,36 @@ def tipo_conteudo(cabecalhos):
     return None
 
 
-def operacao(consulta):
-    """Último valor de nmgp_opcao numa query string ou corpo urlencoded, ou None."""
-    valores = [v for k, v in urllib.parse.parse_qsl(consulta or "", keep_blank_values=True)
-               if k == PARAMETRO_OPERACAO]
-    return valores[-1] if valores else None
+def operacoes(consulta):
+    """(nmgp_opcao, funcao) numa query string ou corpo urlencoded.
+
+    De cada chave vale o último valor; None se a chave não aparece. Nada
+    além desses dois valores sai desta função.
+    """
+    achados = {}
+    for k, v in urllib.parse.parse_qsl(consulta or "", keep_blank_values=True):
+        if k in (PARAMETRO_OPERACAO, PARAMETRO_FUNCAO):
+            achados[k] = v
+    return achados.get(PARAMETRO_OPERACAO), achados.get(PARAMETRO_FUNCAO)
 
 
-def operacao_no_corpo(requisicao):
-    """nmgp_opcao do corpo form-urlencoded que veio no evento.
+def operacoes_no_corpo(requisicao):
+    """(nmgp_opcao, funcao) do corpo form-urlencoded que veio no evento.
 
-    Devolve (valor, disponivel). O corpo só existe dentro desta função e não
-    é devolvido nem gravado.
+    Devolve (opcao, funcao, disponivel). ``disponivel`` é False quando o
+    corpo é form-urlencoded mas não veio no evento (mais de 64 KB): os dois
+    valores ficam desconhecidos e o corpo não é buscado. O corpo só existe
+    dentro desta função e não é devolvido nem gravado.
     """
     if not requisicao.get("hasPostData") or tipo_conteudo(requisicao.get("headers")) != FORMULARIO:
-        return None, True
+        return None, None, True
     if "postData" in requisicao:
-        return operacao(requisicao["postData"]), True
+        return (*operacoes(requisicao["postData"]), True)
     entradas = requisicao.get("postDataEntries")
     if not entradas or any("bytes" not in e for e in entradas):
-        return None, False  # corpo grande demais para vir no evento
+        return None, None, False  # corpo grande demais para vir no evento
     corpo = b"".join(base64.b64decode(e["bytes"]) for e in entradas)
-    return operacao(corpo.decode("utf-8", "replace")), True
+    return (*operacoes(corpo.decode("utf-8", "replace")), True)
 
 
 def origem_e_caminho(url):
@@ -179,8 +189,22 @@ def origem_e_caminho(url):
     return f"{partes.scheme}:", url_registravel(url).split("?", 1)[0]
 
 
+def nova_tupla():
+    return {"contagem": 0, "origens": set(), "status": collections.Counter()}
+
+
+def chave_ordenacao(chave):
+    return tuple(str(parte if parte is not None else "") for parte in chave)
+
+
 class ObservadorRede:
-    """Log ``rede-AAAA-MM-DD.jsonl`` e resumo por (método, caminho, nmgp_opcao)."""
+    """Log ``rede-AAAA-MM-DD.jsonl`` e resumo por (método, caminho, nmgp_opcao, funcao).
+
+    Na chave, ``funcao`` ausente vale ``""``, como nos resumos gravados antes
+    de o gravador extrair ``funcao``. Requisições cujo corpo não veio no evento
+    ficam em tuplas à parte (quinto elemento da chave, ``corpo_fora_do_evento``),
+    porque nelas o valor efetivo do corpo é desconhecido.
+    """
 
     def __init__(self, raiz):
         self.raiz = raiz
@@ -196,12 +220,11 @@ class ObservadorRede:
             with open(caminho, "a", encoding="utf-8", newline="\n") as f:
                 f.write(json.dumps(linha, ensure_ascii=False) + "\n")
 
-    def contar(self, metodo, url, opcao):
+    def contar(self, metodo, url, opcao, funcao, corpo_fora_do_evento=False):
         origem, caminho = origem_e_caminho(url)
-        chave = (metodo, caminho, opcao)
+        chave = (metodo, caminho, opcao, funcao or "", bool(corpo_fora_do_evento))
         with self._trava:
-            tupla = self._tuplas.setdefault(
-                chave, {"contagem": 0, "origens": set(), "status": collections.Counter()})
+            tupla = self._tuplas.setdefault(chave, nova_tupla())
             tupla["contagem"] += 1
             tupla["origens"].add(origem)
             self.requisicoes += 1
@@ -226,9 +249,10 @@ class ObservadorRede:
                 with open(self.caminho_resumo, encoding="utf-8") as f:
                     anterior = json.load(f)
                 for t in anterior.get("tuplas", []):
-                    chave = (t["metodo"], t["caminho"], t["nmgp_opcao"])
-                    atual = total.setdefault(
-                        chave, {"contagem": 0, "origens": set(), "status": collections.Counter()})
+                    # Resumos anteriores à extração de funcao não têm a chave: vale "".
+                    chave = (t["metodo"], t["caminho"], t["nmgp_opcao"], t.get("funcao") or "",
+                             bool(t.get("corpo_fora_do_evento")))
+                    atual = total.setdefault(chave, nova_tupla())
                     atual["contagem"] += t["contagem"]
                     atual["origens"].update(t.get("origens", []))
                     atual["status"].update(t.get("status", {}))
@@ -238,13 +262,22 @@ class ObservadorRede:
         dados = {
             "atualizado_em": agora().isoformat(timespec="seconds"),
             "sessoes": sessoes,
-            "nota": "Acumulado de todas as sessões do gravador com --rede nesta pasta. "
-                    "Fonte do mapa de operações para POSTS_PERMITIDOS e "
-                    "OPERACOES_SCRIPTCASE_BLOQUEADAS em fluxo_exames/guard.py.",
+            "nota": "Acumulado de todas as sessões do gravador com --rede nesta pasta, por "
+                    "(metodo, caminho, nmgp_opcao, funcao). Só evidencia o que foi observado; "
+                    "não libera nem bloqueia nada. Fonte do mapa de operações para "
+                    "POSTS_PERMITIDOS, OPERACOES_SCRIPTCASE_BLOQUEADAS e FUNCOES_AJAX_BLOQUEADAS "
+                    "em fluxo_exames/guard.py. nmgp_opcao e funcao são o valor do corpo "
+                    "form-urlencoded ou, sem ele, o da query. funcao \"\" quer dizer ausente, vazio "
+                    "ou não registrado (sessões gravadas antes da extração de funcao): não é "
+                    "evidência de nenhum valor. Tuplas com corpo_fora_do_evento: true vêm de corpos "
+                    "com mais de 64 KB que o gravador não viu; nelas os valores são só os da query "
+                    "e o do corpo é desconhecido.",
             "tuplas": [
-                {"metodo": m, "caminho": c, "nmgp_opcao": o, "contagem": v["contagem"],
-                 "status": dict(sorted(v["status"].items())), "origens": sorted(v["origens"])}
-                for (m, c, o), v in sorted(total.items(), key=lambda i: (i[0][0], i[0][1], i[0][2] or ""))
+                {"metodo": m, "caminho": c, "nmgp_opcao": o, "funcao": fn,
+                 **({"corpo_fora_do_evento": True} if fora else {}),
+                 "contagem": v["contagem"], "status": dict(sorted(v["status"].items())),
+                 "origens": sorted(v["origens"])}
+                for (m, c, o, fn, fora), v in sorted(total.items(), key=lambda i: chave_ordenacao(i[0]))
             ],
         }
         temporario = self.caminho_resumo + ".tmp"
@@ -368,9 +401,13 @@ class SessaoAlvo(threading.Thread):
                 self.rede.status(self._abertas[ident][2], redirecionamento.get("status"))
             metodo = req.get("method", "")
             url = url_registravel(req.get("url"))
-            opcao_url = operacao(urllib.parse.urlsplit(url).query)
-            opcao_corpo, corpo_disponivel = operacao_no_corpo(req)
-            chave = self.rede.contar(metodo, url, opcao_corpo if opcao_corpo is not None else opcao_url)
+            opcao_url, funcao_url = operacoes(urllib.parse.urlsplit(url).query)
+            opcao_corpo, funcao_corpo, corpo_disponivel = operacoes_no_corpo(req)
+            chave = self.rede.contar(
+                metodo, url,
+                opcao_corpo if opcao_corpo is not None else opcao_url,
+                funcao_corpo if funcao_corpo is not None else funcao_url,
+                corpo_fora_do_evento=not corpo_disponivel)
             self._abertas[ident] = (metodo, url, chave)
             self._abertas.move_to_end(ident)
             while len(self._abertas) > LIMITE_REQUISICOES_ABERTAS:
@@ -382,10 +419,16 @@ class SessaoAlvo(threading.Thread):
                 linha["nmgp_opcao_url"] = opcao_url
             if opcao_corpo is not None:
                 linha["nmgp_opcao_corpo"] = opcao_corpo
+            if funcao_url is not None:
+                linha["funcao_url"] = funcao_url
+            if funcao_corpo is not None:
+                linha["funcao_corpo"] = funcao_corpo
             if req.get("hasPostData"):
                 linha["tipo_corpo"] = tipo_conteudo(req.get("headers")) or "desconhecido"
                 if not corpo_disponivel:
+                    # nmgp_opcao e funcao do corpo ficam desconhecidos; o corpo não é buscado.
                     linha["corpo_fora_do_evento"] = True
+                    linha["funcao_fora_do_evento"] = True
             self.rede.gravar(momento, **linha)
         elif evento == "Network.responseReceived":
             resposta = p.get("response") or {}
@@ -542,7 +585,7 @@ def main():
     p.add_argument("--espera", type=float, default=1.5,
                    help="segundos sem novos eventos de navegação antes do snapshot (padrão: 1.5)")
     p.add_argument("--rede", action="store_true",
-                   help="registra também as requisições (método, URL, status, nmgp_opcao), nunca corpos")
+                   help="registra também as requisições (método, URL, status, nmgp_opcao, funcao), nunca corpos")
     args = p.parse_args()
 
     try:
@@ -562,7 +605,7 @@ def main():
     print(f"Conectado a {versao.get('Browser')} na porta {args.porta}.")
     print(f"Capturas em {registro.raiz}")
     if rede:
-        print("Rede: registrando método, URL, status e nmgp_opcao em rede-AAAA-MM-DD.jsonl (sem corpos).")
+        print("Rede: registrando método, URL, status, nmgp_opcao e funcao em rede-AAAA-MM-DD.jsonl (sem corpos).")
     print("Modo passivo: nenhuma interação com as páginas. Ctrl+C para parar.", flush=True)
 
     parar = threading.Event()
@@ -616,10 +659,11 @@ def main():
 
 def imprimir_resumo_rede(sessao, rede):
     print(f"\nResumo de rede desta sessão: {rede.requisicoes} requisições,"
-          f" {len(sessao)} tuplas (método, caminho, nmgp_opcao).")
-    for (metodo, caminho, opcao), v in sorted(
-            sessao.items(), key=lambda i: (i[0][0] == "GET", i[0][0], i[0][1], i[0][2] or "")):
-        print(f"  {v['contagem']:5d}  {metodo:7s} {caminho}  nmgp_opcao={opcao if opcao is not None else '-'}")
+          f" {len(sessao)} tuplas (método, caminho, nmgp_opcao, funcao).")
+    for (metodo, caminho, opcao, funcao, fora), v in sorted(
+            sessao.items(), key=lambda i: (i[0][0] == "GET", *chave_ordenacao(i[0]))):
+        print(f"  {v['contagem']:5d}  {metodo:7s} {caminho}  nmgp_opcao={opcao if opcao is not None else '-'}"
+              f"  funcao={funcao or '-'}" + ("  [corpo fora do evento]" if fora else ""))
     print(f"Acumulado salvo em {rede.caminho_resumo}", flush=True)
 
 

@@ -199,6 +199,8 @@ Contagens reais (requisições), todas com status 200, salvo onde indicado. O ti
 
 "Inferido do JS" quer dizer que o gravador guardou o POST sem o valor de `funcao`, porque só extrai `nmgp_opcao`. O valor foi deduzido das chamadas `$.post` automáticas presentes nas capturas. O mesmo endpoint também recebe valores de escrita, então a guarda libera **por valor de `funcao`**, e nunca o endpoint inteiro.
 
+Desde a Etapa B.2, o gravador registra `funcao` (`funcao_url` e `funcao_corpo` no jsonl) e o `rede-resumo.json` passou a separar as tuplas por (método, caminho, `nmgp_opcao`, `funcao`); ver `FASE-0-ETAPA-A.md`, item 4.1. Na próxima sessão gravada, os valores desta tabela deixam de depender de dedução: a guarda v2 poderá liberar (caminho, `funcao`) direto da evidência gravada. As tuplas da sessão de 26/09 continuam no resumo com `funcao: ""` (não registrado). Até lá, as listas da v1 ficam como estão.
+
 ## 6. Classificação das operações duvidosas
 
 ### 6.1 `ajax_save_ancor` — benigno, liberado
@@ -248,7 +250,7 @@ São endpoints de assinatura, PDF, cadeado, status da agenda, envio, integraçã
 - **Exames → Resultado e Anexo** (item 164 e anexos): não foram abertos. Só apareceu o widget "Resultado" dentro do contêiner do laudo (item 6).
 - **Teste de sessão simultânea** (item 8): não há registro nas capturas.
 - **Paginação e ordenação de grade:** não foram exercitadas, porque as grades tinham no máximo 3 linhas. `nmgp_opcao=rec`, `ordem` etc. continuam fora da lista branca.
-- **Corpos dos POSTs `blank_*_funcoes`:** o gravador não grava `funcao`, e os valores da seção 5 são inferidos. Proposta: o gravador passa a extrair também o valor de `funcao` do corpo urlencoded, com a mesma regra usada para `nmgp_opcao`.
+- **Corpos dos POSTs `blank_*_funcoes`:** nesta sessão o gravador não gravava `funcao`, e os valores da seção 5 são inferidos. Resolvido para as próximas sessões na Etapa B.2: o gravador extrai também o valor de `funcao` da query e do corpo urlencoded, com a mesma regra usada para `nmgp_opcao`, e o resumo o inclui na chave.
 - **JS externo** (`*_ajax.js` das grades, onde fica `ajax_save_ancor`): não é capturado, porque o gravador só grava HTML.
 - **Encerramento:** a sessão foi encerrada por kill, sem Ctrl+C, e o resumo teve de ser reconstruído (ver item 1).
 

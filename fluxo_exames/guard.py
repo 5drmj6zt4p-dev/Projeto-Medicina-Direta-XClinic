@@ -44,6 +44,14 @@ gravador com ``--rede`` e das capturas HTML. Os arquivos ficam na pasta local
 de capturas e não entram no repositório. Para cá vêm só caminhos e valores
 de operação, sem query nem identificador de paciente.
 
+Nesta versão, os valores de ``funcao`` liberados em ``POSTS_PERMITIDOS`` foram
+deduzidos do JS das capturas, porque o gravador da sessão de 26/09 não os
+registrava. Desde a Etapa B.2, o gravador registra ``funcao`` (query e corpo
+urlencoded) e o ``rede-resumo.json`` agrupa por (método, caminho,
+``nmgp_opcao``, ``funcao``). A fonte de evidência passa a incluir o valor de
+``funcao`` gravado, e a guarda v2 poderá liberar (caminho, ``funcao``) direto
+dessa evidência. As listas desta versão continuam as mesmas.
+
 ESTADO: versão 1. ``nmgp_opcao=igual`` no formulário do laudo e o ``GET``
 automático de ``blank_fecha_atendimento`` estão bloqueados **pendentes de
 validação** (``OPERACOES_PENDENTES_VALIDACAO``). Com isso o formulário do laudo
