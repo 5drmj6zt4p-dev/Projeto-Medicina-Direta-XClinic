@@ -374,6 +374,6 @@ Não foi exercitada. As grades do paciente A tinham no máximo 3 linhas (laudo 1
 
 Observação empírica do Ivson na sessão C: ele ficou logado no MD **ao mesmo tempo** no Chrome (perfil dedicado) e no Edge, com o mesmo usuário. As duas sessões funcionaram normalmente, e uma não derrubou a outra. O gravador só observa o Chrome, então não há registro de rede do Edge. Isso responde, por experiência, a pergunta 3 do e-mail ao suporte (limite de sessão simultânea). A confirmação definitiva, inclusive sobre limites de política, continua sendo com o suporte.
 
-### 9.9 Limitação do gravador vista na sessão C
+### 9.9 Limitação do gravador vista na sessão C — RESOLVIDA na F0-D (commit e86fb8c)
 
-O gravador se conecta a uma aba nova só depois que ela aparece em `/json/list`. As primeiras requisições da aba se perdem. Nas 3 abas do Imprimir, o POST do form nunca foi registrado; o `POST /blank_laudo_pdf/` foi registrado em 1 das 3. Por isso o `rede-resumo.json` subconta requisições de abas novas. Proposta para a próxima sessão: descobrir alvos com `Target.setDiscoverTargets` e conectar pelo evento `targetCreated`. Isso reduz a janela, mas não a elimina sem pausar a aba, o que exigiria sair do modo passivo.
+~~O gravador se conecta a uma aba nova só depois que ela aparece em `/json/list`. As primeiras requisições da aba se perdem.~~ **Resolvido:** o gravador agora faz auto-attach a nível de browser (`Target.setAutoAttach`, flatten) e registra abas novas desde a 1ª requisição — validado com Imprimir simulado (POST do form + `POST /blank_laudo_pdf/` capturados com `nmgp_opcao`/`funcao`), redirect em cadeia e `window.open` com iframes (86 verificações; suíte completa 187 passed). Detalhes em `docs/FASE-0-ETAPA-A.md` §4.2.
