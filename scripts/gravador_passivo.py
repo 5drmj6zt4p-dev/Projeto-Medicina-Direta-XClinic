@@ -19,10 +19,23 @@ do repositório, porque as capturas da Etapa B terão dados reais de paciente.
   leitura ou de assinatura de eventos. Qualquer outro comando levanta erro
   antes de sair;
 - não executa JavaScript na página (não usa ``Runtime.evaluate``);
-- não clica, não digita, não navega, não abre nem fecha abas. Só observa os
-  alvos que já existem (HTTP ``/json/list``; nunca ``/json/new``);
+- não clica, não digita, não navega, não abre nem fecha abas. Por HTTP, só
+  lê ``/json/version`` (nunca ``/json/new``);
 - o nome dos arquivos e o console usam só host e caminho da URL. Título e
   URL completa ficam apenas no ``sessao.log``.
+
+Anexação (Etapa D): uma só conexão, no websocket do navegador, com
+``Target.setAutoAttach`` (``flatten``, ``waitForDebuggerOnStart``). O Chrome
+anexa o gravador às abas que já existem e, dali em diante, a cada aba nova
+(e a cada iframe de outro site, via o mesmo comando na sessão da aba) no
+momento em que ela nasce, **pausada antes da primeira requisição**. O
+gravador liga ``Network.enable``, ``Page.enable`` e o auto-attach dos filhos
+nessa sessão e só então solta a aba com ``Runtime.runIfWaitingForDebugger``.
+Assim nenhuma requisição escapa entre a criação da aba e a anexação (antes,
+as abas eram descobertas por ``/json/list`` a cada 2 s e perdiam as
+primeiras requisições: o POST do Imprimir, por exemplo). A aba é solta
+mesmo se a preparação falhar, e o Chrome solta sozinho as abas pausadas se
+a conexão cair.
 
 Opção ``--rede`` (desligada por padrão): observação passiva das requisições,
 para montar o mapa de operações do ScriptCase que alimenta
@@ -73,6 +86,16 @@ METODOS_CDP_PERMITIDOS = frozenset({
     "DOM.getDocument",    # lê a árvore do DOM
     "DOM.getOuterHTML",   # lê o HTML de um nó
     "DOM.disable",        # para de receber eventos do DOM
+    # Etapa D. Anexa o gravador às abas e aos iframes de outro site no momento
+    # em que nascem, pausados antes da 1ª requisição. Não cria, fecha nem
+    # navega alvos. Target.attachToTarget, createTarget, closeTarget e afins
+    # continuam de fora: o auto-attach já cobre os alvos que existem.
+    "Target.setAutoAttach",
+    # Etapa D. Solta o alvo que o auto-attach segurou, depois de Network.enable
+    # e Page.enable já valerem. Não executa JavaScript: só libera o carregamento
+    # pausado. É o único comando que desfaz a pausa de waitForDebuggerOnStart,
+    # por isso não há como usar o auto-attach com pausa sem ele.
+    "Runtime.runIfWaitingForDebugger",
 })
 # Só com --rede. Network.enable liga o envio de eventos de rede; dos eventos
 # que chegam, só EVENTOS_REDE são processados. Comandos que buscam conteúdo
@@ -90,8 +113,16 @@ PARAMETRO_OPERACAO = "nmgp_opcao"
 PARAMETRO_FUNCAO = "funcao"  # operação dos endpoints blank_*_funcoes
 FORMULARIO = "application/x-www-form-urlencoded"
 LIMITE_REQUISICOES_ABERTAS = 5000
-ROTAS_HTTP_PERMITIDAS = frozenset({"/json/version", "/json/list"})
+ROTAS_HTTP_PERMITIDAS = frozenset({"/json/version"})
 TIPOS_ALVO = frozenset({"page", "iframe"})
+# Só abas e iframes de outro site são anexados (e pausados). Workers, service
+# workers, "tab" e o próprio navegador ficam de fora e seguem sem pausa.
+PARAMS_AUTO_ATTACH = {
+    "autoAttach": True,
+    "waitForDebuggerOnStart": True,
+    "flatten": True,
+    "filter": [{"type": t, "exclude": False} for t in sorted(TIPOS_ALVO)] + [{"exclude": True}],
+}
 PREFIXOS_INTERNOS = ("chrome://", "chrome-extension://", "chrome-untrusted://",
                      "devtools://", "about:", "edge://")
 EVENTOS_NAVEGACAO = frozenset({
@@ -101,7 +132,6 @@ EVENTOS_NAVEGACAO = frozenset({
     "Page.loadEventFired",
 })
 TIMEOUT_COMANDO = 20.0
-INTERVALO_DESCOBERTA = 2.0
 ESPERA_RECONEXAO = 5.0
 
 
@@ -318,38 +348,56 @@ class Registro:
         return caminho
 
 
-class SessaoAlvo(threading.Thread):
-    """Uma conexão CDP com um alvo (aba ou iframe fora do processo)."""
+class ConexaoCDP:
+    """Websocket do navegador, com as sessões dos alvos multiplexadas por ``sessionId``.
 
-    def __init__(self, alvo, registro, espera, parar, rede=None):
-        super().__init__(daemon=True, name=f"alvo-{alvo['id'][:8]}")
-        self.alvo = alvo
-        self.id_curto = alvo["id"][:8]
-        self.registro = registro
-        self.espera = espera
-        self.parar = parar
-        self.rede = rede
-        self.permitidos = METODOS_CDP_PERMITIDOS | (METODOS_CDP_REDE if rede else frozenset())
-        self._abertas = collections.OrderedDict()  # requestId -> (método, url, chave do resumo)
+    Toda mensagem sai por ``enviar``, que recusa qualquer comando fora de
+    ``permitidos`` antes de enviar. Respostas voltam a quem enviou; eventos
+    vão para ``ao_evento(conexao, msg)``, na thread de leitura e na ordem em que
+    chegam.
+    """
+
+    def __init__(self, url_ws, permitidos, ao_evento):
+        self.url_ws = url_ws
+        self.permitidos = permitidos
+        self.ao_evento = ao_evento
         self.ws = None
         self._ids = itertools.count(1)
         self._pendentes = {}
         self._trava = threading.Lock()
-        self._prazo = None
-        self._motivo = None
-        self._ultimo_hash = None
-        self._fechado = threading.Event()
+        self.fechada = threading.Event()
 
-    # --- CDP -------------------------------------------------------------
+    def abrir(self):
+        self.ws = websocket.create_connection(
+            self.url_ws, timeout=None, suppress_origin=True, enable_multithread=True)
+        threading.Thread(target=self._ler, daemon=True, name="leitor-cdp").start()
 
-    def enviar(self, metodo, params=None):
+    def _checar(self, metodo):
         if metodo not in self.permitidos:
             raise RuntimeError(f"comando CDP não permitido: {metodo}")
+
+    def _despachar(self, metodo, params, sessao, esperar=True):
+        self._checar(metodo)
         ident = next(self._ids)
-        resposta = queue.Queue(maxsize=1)
-        with self._trava:
-            self._pendentes[ident] = resposta
-        self.ws.send(json.dumps({"id": ident, "method": metodo, "params": params or {}}))
+        mensagem = {"id": ident, "method": metodo, "params": params or {}}
+        if sessao:
+            mensagem["sessionId"] = sessao
+        resposta = None
+        if esperar:
+            resposta = queue.Queue(maxsize=1)
+            with self._trava:
+                if self.fechada.is_set():
+                    raise RuntimeError(f"{metodo}: conexão com o navegador fechada")
+                self._pendentes[ident] = resposta
+        try:
+            self.ws.send(json.dumps(mensagem))
+        except BaseException:
+            with self._trava:
+                self._pendentes.pop(ident, None)
+            raise
+        return ident, resposta
+
+    def _colher(self, metodo, ident, resposta):
         try:
             msg = resposta.get(timeout=TIMEOUT_COMANDO)
         except queue.Empty:
@@ -361,9 +409,34 @@ class SessaoAlvo(threading.Thread):
             raise RuntimeError(f"{metodo}: {msg['error'].get('message')}")
         return msg.get("result", {})
 
+    def enviar(self, metodo, params=None, sessao=None, esperar=True):
+        """Envia um comando permitido. Com ``esperar=False`` não aguarda a resposta."""
+        ident, resposta = self._despachar(metodo, params, sessao, esperar)
+        return self._colher(metodo, ident, resposta) if esperar else None
+
+    def enviar_em_lote(self, comandos, sessao=None):
+        """Envia ``[(metodo, params), ...]`` em sequência, sem esperar entre eles, e só
+        depois colhe as respostas.
+
+        É o que permite preparar um alvo pausado: ele só responde depois de solto,
+        mas o Chrome processa os comandos de uma sessão na ordem em que chegam.
+        Todos os métodos são conferidos antes de o primeiro sair.
+        """
+        for metodo, _ in comandos:
+            self._checar(metodo)
+        enviados = [(metodo, *self._despachar(metodo, params, sessao)) for metodo, params in comandos]
+        erros = []
+        for metodo, ident, resposta in enviados:
+            try:
+                self._colher(metodo, ident, resposta)
+            except (RuntimeError, TimeoutError) as erro:
+                erros.append(str(erro))
+        if erros:
+            raise RuntimeError("; ".join(erros))
+
     def _ler(self):
         try:
-            while not self.parar.is_set():
+            while True:
                 bruto = self.ws.recv()
                 if not bruto:
                     continue
@@ -373,20 +446,144 @@ class SessaoAlvo(threading.Thread):
                         destino = self._pendentes.get(msg["id"])
                     if destino:
                         destino.put(msg)
-                elif msg.get("method") in EVENTOS_NAVEGACAO:
-                    with self._trava:
-                        self._prazo = time.monotonic() + self.espera
-                        self._motivo = msg["method"].split(".", 1)[1]
-                elif self.rede and msg.get("method") in EVENTOS_REDE:
-                    try:
-                        self._evento_rede(msg["method"], msg.get("params") or {})
-                    except Exception as erro:  # um evento estranho não derruba a aba
-                        self.registro.erros += 1
-                        self.registro.evento("ERRO", alvo=self.id_curto, detalhe=f"rede: {type(erro).__name__}")
+                else:
+                    self.ao_evento(self, msg)
         except (websocket.WebSocketException, OSError, ValueError):
             pass
         finally:
-            self._fechado.set()
+            with self._trava:
+                self.fechada.set()
+                for destino in self._pendentes.values():
+                    destino.put({"error": {"message": "conexão com o navegador fechada"}})
+
+    def fechar(self):
+        try:
+            if self.ws:
+                self.ws.close()
+        except (websocket.WebSocketException, OSError):
+            pass
+
+
+class Gravador:
+    """Anexa-se ao navegador e mantém uma ``SessaoAlvo`` por aba ou iframe de outro site."""
+
+    def __init__(self, registro, espera, parar, rede=None):
+        self.registro = registro
+        self.espera = espera
+        self.parar = parar
+        self.rede = rede
+        self.permitidos = METODOS_CDP_PERMITIDOS | (METODOS_CDP_REDE if rede else frozenset())
+        self.conexao = None
+        self._sessoes = {}  # sessionId -> SessaoAlvo
+        self._trava = threading.Lock()
+
+    def ativo(self):
+        return self.conexao is not None and not self.conexao.fechada.is_set()
+
+    def conectar(self, url_ws):
+        self.conexao = ConexaoCDP(url_ws, self.permitidos, self._ao_evento)
+        self.conexao.abrir()
+        # No navegador: anexa as abas que já existem e, dali em diante, cada aba
+        # nova no momento em que nasce, pausada até a SessaoAlvo soltá-la.
+        self.conexao.enviar("Target.setAutoAttach", PARAMS_AUTO_ATTACH)
+
+    def encerrar(self, espera_threads=3):
+        """Fecha a conexão (o Chrome solta os alvos ainda pausados) e as sessões."""
+        if self.conexao:
+            self.conexao.fechar()
+        self.conexao = None
+        with self._trava:
+            sessoes = list(self._sessoes.values())
+            self._sessoes.clear()
+        for sessao in sessoes:
+            sessao.encerrar()
+        for sessao in sessoes:
+            sessao.join(timeout=espera_threads)
+
+    def _ao_evento(self, conexao, msg):
+        metodo, p = msg.get("method"), msg.get("params") or {}
+        try:
+            if metodo == "Target.attachedToTarget":
+                self._anexado(conexao, p, msg.get("sessionId"))
+            elif metodo == "Target.detachedFromTarget":
+                with self._trava:
+                    sessao = self._sessoes.pop(p.get("sessionId"), None)
+                if sessao:
+                    sessao.encerrar()
+            else:
+                with self._trava:
+                    sessao = self._sessoes.get(msg.get("sessionId"))
+                if sessao:
+                    sessao.ao_evento(metodo, p)
+        except Exception as erro:  # um evento estranho não derruba a conexão
+            self.registro.erros += 1
+            self.registro.evento("ERRO", detalhe=f"evento {metodo}: {type(erro).__name__}: {erro}")
+
+    def _anexado(self, conexao, p, sessao_pai):
+        """Target.attachedToTarget: vale para as abas (sessão do navegador) e para
+        os iframes de outro site (sessão da aba ou do iframe pai)."""
+        info = p.get("targetInfo") or {}
+        sessao_id = p.get("sessionId")
+        with self._trava:
+            pai = self._sessoes.get(sessao_pai)
+            repetido = any(s.alvo["id"] == info.get("targetId") for s in self._sessoes.values())
+        if (info.get("type") not in TIPOS_ALVO or info.get("url", "").startswith("devtools://")
+                or repetido or not sessao_id):
+            # Fora do escopo: nenhum domínio é ligado; só se desfaz a pausa.
+            if p.get("waitingForDebugger") and sessao_id:
+                conexao.enviar("Runtime.runIfWaitingForDebugger", sessao=sessao_id, esperar=False)
+            return
+        alvo = {"id": info["targetId"], "type": info.get("type"), "url": info.get("url", ""),
+                "parentId": pai.alvo["id"] if pai else "", "openerId": info.get("openerId") or ""}
+        sessao = SessaoAlvo(alvo, sessao_id, conexao, self.registro, self.espera, self.parar,
+                            self.rede, pausado=bool(p.get("waitingForDebugger")))
+        # Registrada antes de a thread de leitura seguir: nenhum evento da sessão se perde.
+        with self._trava:
+            self._sessoes[sessao_id] = sessao
+        sessao.start()
+
+
+class SessaoAlvo(threading.Thread):
+    """Uma sessão CDP (flatten) com um alvo: aba ou iframe fora do processo."""
+
+    def __init__(self, alvo, sessao_id, conexao, registro, espera, parar, rede=None, pausado=False):
+        super().__init__(daemon=True, name=f"alvo-{alvo['id'][:8]}")
+        self.alvo = alvo
+        self.id_curto = alvo["id"][:8]
+        self.sessao_id = sessao_id
+        self.conexao = conexao
+        self.registro = registro
+        self.espera = espera
+        self.parar = parar
+        self.rede = rede
+        self.pausado = pausado
+        self._abertas = collections.OrderedDict()  # requestId -> (método, url, chave do resumo)
+        self._trava = threading.Lock()
+        self._prazo = None
+        self._motivo = None
+        self._ultimo_hash = None
+        self._fechado = threading.Event()
+
+    # --- CDP -------------------------------------------------------------
+
+    def enviar(self, metodo, params=None):
+        return self.conexao.enviar(metodo, params, sessao=self.sessao_id)
+
+    def ao_evento(self, metodo, params):
+        """Eventos desta sessão, na thread de leitura da conexão."""
+        if metodo in EVENTOS_NAVEGACAO:
+            with self._trava:
+                self._prazo = time.monotonic() + self.espera
+                self._motivo = metodo.split(".", 1)[1]
+        elif self.rede and metodo in EVENTOS_REDE:
+            try:
+                self._evento_rede(metodo, params)
+            except Exception as erro:  # um evento estranho não derruba a aba
+                self.registro.erros += 1
+                self.registro.evento("ERRO", alvo=self.id_curto, detalhe=f"rede: {type(erro).__name__}")
+
+    def encerrar(self):
+        self._fechado.set()
 
     # --- rede (--rede) ---------------------------------------------------
 
@@ -527,7 +724,9 @@ class SessaoAlvo(threading.Thread):
                 return
             except (RuntimeError, TimeoutError) as erro:
                 # O DOM pode mudar no meio da leitura (nó some); tenta de novo.
-                if tentativa == 2 or self._fechado.is_set():
+                if self.parar.is_set():
+                    return  # encerramento no meio da leitura: não é erro
+                if tentativa == 2 or self._fechado.is_set() or self.conexao.fechada.is_set():
                     self.registro.erros += 1
                     self.registro.evento("ERRO", alvo=self.id_curto, motivo=motivo, detalhe=str(erro))
                     return
@@ -535,23 +734,30 @@ class SessaoAlvo(threading.Thread):
 
     # --- ciclo -----------------------------------------------------------
 
+    def _preparar(self):
+        """Liga os domínios com o alvo ainda pausado e só então o solta.
+
+        Vai tudo num lote: o alvo pausado só responde depois de solto, e o
+        Chrome aplica os comandos da sessão na ordem de chegada, então
+        Network.enable já vale quando a pausa se desfaz. A soltura sai no mesmo
+        lote, mesmo que algum comando anterior falhe: a aba não fica parada.
+        """
+        comandos = [("Network.enable", PARAMS_NETWORK_ENABLE)] if self.rede else []
+        comandos += [("Page.enable", None),
+                     # Iframes de outro site deste alvo: anexados e pausados do mesmo jeito.
+                     ("Target.setAutoAttach", PARAMS_AUTO_ATTACH)]
+        if self.pausado:
+            comandos.append(("Runtime.runIfWaitingForDebugger", None))
+        self.conexao.enviar_em_lote(comandos, sessao=self.sessao_id)
+
     def run(self):
+        abertura = self.alvo.get("openerId")
+        self.registro.evento("CONECTADO", alvo=self.id_curto, tipo=self.alvo.get("type"), rede=bool(self.rede),
+                             pausado=self.pausado, **({"aberta_por": abertura[:8]} if abertura else {}))
         try:
-            self.ws = websocket.create_connection(
-                self.alvo["webSocketDebuggerUrl"], timeout=None,
-                suppress_origin=True, enable_multithread=True)
-        except (websocket.WebSocketException, OSError) as erro:
-            self.registro.evento("ERRO", alvo=self.id_curto, detalhe=f"conexão: {erro}")
-            return
-        leitor = threading.Thread(target=self._ler, daemon=True, name=f"leitor-{self.id_curto}")
-        leitor.start()
-        self.registro.evento("CONECTADO", alvo=self.id_curto, tipo=self.alvo.get("type"), rede=bool(self.rede))
-        try:
-            if self.rede:
-                self.enviar("Network.enable", PARAMS_NETWORK_ENABLE)
-            self.enviar("Page.enable")
+            self._preparar()
             self._capturar_com_retentativa("inicial")
-            while not self.parar.is_set() and not self._fechado.is_set():
+            while not (self.parar.is_set() or self._fechado.is_set() or self.conexao.fechada.is_set()):
                 with self._trava:
                     pronto = self._prazo is not None and time.monotonic() >= self._prazo
                     motivo = self._motivo
@@ -565,15 +771,7 @@ class SessaoAlvo(threading.Thread):
                 self.registro.erros += 1
                 self.registro.evento("ERRO", alvo=self.id_curto, detalhe=f"{type(erro).__name__}: {erro}")
         finally:
-            self.fechar()
             self.registro.evento("DESCONECTADO", alvo=self.id_curto)
-
-    def fechar(self):
-        try:
-            if self.ws:
-                self.ws.close()
-        except (websocket.WebSocketException, OSError):
-            pass
 
 
 def main():
@@ -588,6 +786,13 @@ def main():
                    help="registra também as requisições (método, URL, status, nmgp_opcao, funcao), nunca corpos")
     args = p.parse_args()
 
+    if hasattr(signal, "SIGBREAK"):  # Windows: Ctrl+Break encerra igual a Ctrl+C
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)
+    return executar(args, threading.Event())
+
+
+def executar(args, parar):
+    """Grava até Ctrl+C (KeyboardInterrupt) ou até ``parar`` ser acionado."""
     try:
         versao = http_get_json(args.host, args.porta, "/json/version")
     except OSError as erro:
@@ -595,9 +800,6 @@ def main():
               "Abra o Chrome do perfil dedicado com --remote-debugging-port (ver docs/FASE-0-ETAPA-A.md).",
               file=sys.stderr)
         return 2
-
-    if hasattr(signal, "SIGBREAK"):  # Windows: Ctrl+Break encerra igual a Ctrl+C
-        signal.signal(signal.SIGBREAK, signal.default_int_handler)
 
     registro = Registro(os.path.abspath(args.saida))
     rede = ObservadorRede(registro.raiz) if args.rede else None
@@ -608,47 +810,27 @@ def main():
         print("Rede: registrando método, URL, status, nmgp_opcao e funcao em rede-AAAA-MM-DD.jsonl (sem corpos).")
     print("Modo passivo: nenhuma interação com as páginas. Ctrl+C para parar.", flush=True)
 
-    parar = threading.Event()
-    sessoes = {}
-    inicios = {}
+    gravador = Gravador(registro, args.espera, parar, rede)
+    proxima_tentativa = 0.0
     try:
-        while True:
-            try:
-                alvos = http_get_json(args.host, args.porta, "/json/list")
-            except OSError as erro:
-                registro.evento("ERRO", detalhe=f"/json/list: {erro}")
-                alvos = None
-            if alvos is not None:
-                vistos = set()
-                for alvo in alvos:
-                    if alvo.get("type") not in TIPOS_ALVO or not alvo.get("webSocketDebuggerUrl"):
-                        continue
-                    if alvo.get("url", "").startswith("devtools://"):
-                        continue
-                    vistos.add(alvo["id"])
-                    atual = sessoes.get(alvo["id"])
-                    if atual and atual.is_alive():
-                        continue
-                    if time.monotonic() - inicios.get(alvo["id"], -ESPERA_RECONEXAO) < ESPERA_RECONEXAO:
-                        continue
-                    inicios[alvo["id"]] = time.monotonic()
-                    sessoes[alvo["id"]] = SessaoAlvo(alvo, registro, args.espera, parar, rede)
-                    sessoes[alvo["id"]].start()
-                for ident in list(sessoes):
-                    if ident not in vistos and not sessoes[ident].is_alive():
-                        del sessoes[ident]
-                        inicios.pop(ident, None)
-            fim = time.monotonic() + INTERVALO_DESCOBERTA
-            while time.monotonic() < fim:
-                time.sleep(0.2)
+        while not parar.is_set():
+            if not gravador.ativo():
+                if gravador.conexao is not None:
+                    gravador.encerrar()
+                    registro.evento("ERRO", detalhe="conexão com o navegador perdida")
+                if time.monotonic() >= proxima_tentativa:
+                    try:
+                        gravador.conectar(http_get_json(args.host, args.porta, "/json/version")["webSocketDebuggerUrl"])
+                    except (OSError, websocket.WebSocketException, RuntimeError, TimeoutError, KeyError) as erro:
+                        gravador.encerrar()
+                        registro.evento("ERRO", detalhe=f"conexão com o navegador: {type(erro).__name__}: {erro}")
+                        proxima_tentativa = time.monotonic() + ESPERA_RECONEXAO
+            time.sleep(0.2)
     except KeyboardInterrupt:
         pass
     finally:
         parar.set()
-        for sessao in sessoes.values():
-            sessao.fechar()
-        for sessao in sessoes.values():
-            sessao.join(timeout=3)
+        gravador.encerrar()
         if rede:
             imprimir_resumo_rede(rede.salvar_resumo(), rede)
         registro.evento("FIM", capturas=registro.capturas, erros=registro.erros,

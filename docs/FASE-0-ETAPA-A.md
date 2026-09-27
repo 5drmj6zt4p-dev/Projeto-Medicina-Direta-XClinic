@@ -55,7 +55,7 @@ A cada navegação em qualquer aba, o gravador salva:
 
 | Onde | Conteúdo |
 |---|---|
-| `captures\sessao.log` | Uma linha JSON por evento: `INICIO`, `CONECTADO`, `CAPTURA` (horário, motivo, aba, URL completa, título, arquivos), `ERRO`, `DESCONECTADO`, `FIM` |
+| `captures\sessao.log` | Uma linha JSON por evento: `INICIO`, `CONECTADO` (aba, tipo, `pausado`, `aberta_por` quando a aba foi aberta por outra), `CAPTURA` (horário, motivo, aba, URL completa, título, arquivos), `ERRO`, `DESCONECTADO`, `FIM` |
 | `captures\AAAA-MM-DD\HHMMSS-<slug>.html` | outerHTML do documento principal da aba |
 | `captures\AAAA-MM-DD\HHMMSS-<slug>.qNN-<slug>.html` | outerHTML de cada iframe do mesmo site, em ordem de documento. Iframes de outro site viram um alvo próprio, ligado à aba pelo campo `alvo_pai` |
 
@@ -78,11 +78,38 @@ O gravador **não** captura:
 **Garantias de passividade:**
 
 - usa só `websocket-client` puro, porque o Playwright injeta scripts de apoio ao conectar;
-- aceita só os comandos CDP `Page.enable`, `DOM.getDocument`, `DOM.getOuterHTML` e `DOM.disable`, mais `Network.enable` quando `--rede` está ligada. Recusa qualquer outro antes de enviar;
+- aceita só os comandos CDP `Page.enable`, `DOM.getDocument`, `DOM.getOuterHTML` e `DOM.disable`, mais `Target.setAutoAttach` e `Runtime.runIfWaitingForDebugger` para anexar as abas novas (item 4.2) e `Network.enable` quando `--rede` está ligada. Recusa qualquer outro antes de enviar, inclusive `Runtime.evaluate`, `Target.attachToTarget`, `Target.createTarget` e `Target.closeTarget`;
 - não roda JavaScript na página, não clica, não digita e não navega;
-- não abre nem fecha abas: usa só `GET /json/version` e `GET /json/list`.
+- não abre nem fecha abas. Por HTTP, usa só `GET /json/version`, para achar o websocket do navegador.
 
 O comportamento foi testado com páginas sintéticas locais, incluindo iframes aninhados, iframe de outro site, navegação só em iframe e `pushState`. O servidor de teste recebeu apenas os GETs das navegações simuladas. O gravador não gerou nenhuma requisição.
+
+### 4.2 Abas novas: registro desde a primeira requisição (Etapa D)
+
+**O problema.** Até a Etapa C, o gravador descobria as abas lendo `/json/list` a cada 2 s e abria uma conexão para cada uma. Uma aba nova já tinha começado a carregar quando o gravador chegava, e as primeiras requisições dela se perdiam. Na sessão de 27/09, isso atingiu o Imprimir: o POST do F1 não foi registrado em nenhuma das 3 abas, e o `POST /blank_laudo_pdf/` foi registrado em só 1 delas (`FASE-0-ETAPA-B.md` §9.9). **Essa limitação não existe mais**; as observações de B §9.9 e C §5 valem para as gravações feitas até a Etapa C.
+
+**Como funciona agora.**
+
+1. O gravador abre uma única conexão, no websocket do navegador (o `webSocketDebuggerUrl` de `/json/version`), e envia `Target.setAutoAttach` com `waitForDebuggerOnStart` e `flatten`, filtrando só abas (`page`) e iframes de outro site (`iframe`). Workers, service workers e o próprio navegador ficam de fora e não são pausados.
+2. O Chrome anexa o gravador às abas que já existem. Daí em diante, anexa cada aba nova no momento em que ela nasce, **pausada antes da primeira requisição**. Isso vale para qualquer aba nova; `target="_blank"` e `window.open` estão testados.
+3. Na sessão da aba pausada, o gravador envia num lote `Network.enable` (com `--rede`), `Page.enable`, o mesmo `Target.setAutoAttach` (para os iframes de outro site dessa aba, que nascem pausados do mesmo jeito) e, por último, `Runtime.runIfWaitingForDebugger`, que solta a aba. O Chrome aplica os comandos de uma sessão na ordem em que chegam. Por isso a rede já está sendo observada quando a aba sai da pausa. O lote é necessário porque a aba pausada só responde depois de solta.
+4. `Runtime.runIfWaitingForDebugger` **não executa JavaScript**: só libera o carregamento que o Chrome segurou. É o único comando que desfaz essa pausa, e por isso entrou na lista de permitidos junto com `Target.setAutoAttach`.
+
+**A aba do Ivson nunca fica presa.** A pausa dura o tempo de ida e volta desses comandos, alguns milissegundos. A soltura sai no mesmo lote da preparação, mesmo que um comando anterior dê erro. Se a conexão cair ou o gravador morrer, o Chrome solta sozinho as abas pausadas. O teste confere que abas novas carregam normalmente depois de um Ctrl+Break e depois de um kill do gravador. Se o Chrome fechar, o gravador tenta reconectar a cada 5 s até o Ctrl+C.
+
+No `sessao.log`, o evento `CONECTADO` de uma aba nova vem com `pausado: true` e `aberta_por` (a aba que a abriu). Isso liga a aba do Imprimir à ficha de origem. O campo `alvo` do `rede-*.jsonl` é o mesmo da aba.
+
+**Teste** (`tests/test_gravador.py`, Chrome descartável e servidor sintético local):
+
+- **Imprimir simulado:** um F1 multipart com `target="_blank"` abre uma aba nova. A 1ª requisição dessa aba no jsonl é o POST do F1, com `nmgp_opcao` da query. Em seguida vêm o `POST /blank_laudo_pdf/`, com `nmgp_opcao` e `funcao` do corpo, e os recursos da página.
+- **Redirecionamento em cadeia na aba nova:** POST → 302 → 303 → GET, no mesmo `requestId`, com `status_redirecionamento`.
+- **POST de navegação acima de 64 KB** como 1ª requisição da aba.
+- **`window.open` de página com iframes:** iframes do mesmo site aninhados, um iframe de outro site e fetches disparados na carga, um deles acima de 64 KB.
+- **Não regressão:** aba e iframe de outro site já abertos, navegação só em iframe, `pushState`, resumo com a chave de 4+1 elementos, execução sem `--rede` e encerramento por Ctrl+Break.
+- **Conferências:** toda requisição recebida pelo servidor durante a gravação está no jsonl, e nenhum marcador dos corpos de requisição ou de resposta aparece em arquivo gravado. Os comandos que saíram pelo websocket foram interceptados: só os da lista, no navegador só `Target.setAutoAttach`, e em cada aba nova `Network.enable` antes da soltura.
+- **Contraprova:** o gravador anterior perdeu as 7 requisições das abas novas nesse mesmo cenário.
+
+**Observação:** em POSTs de navegação (formulário, tipo `Document`), o Chrome 154 entrega o corpo inteiro no evento mesmo acima de 64 KB. Nesses casos, o gravador extrai `nmgp_opcao` e `funcao` normalmente. `corpo_fora_do_evento` aparece nos XHR/fetch acima de 64 KB.
 
 **Privacidade:** as capturas da Etapa B terão dados reais de paciente (nome, CPF, laudos).
 
@@ -98,7 +125,7 @@ python scripts\gravador_passivo.py --rede
 
 **Para que serve.** A guarda de `fluxo_exames/guard.py` nega todo POST que não esteja em `POSTS_PERMITIDOS` e bloqueia as operações de gravação em `OPERACOES_SCRIPTCASE_BLOQUEADAS`. No ScriptCase, o que diferencia uma leitura de uma gravação costuma ser o parâmetro `nmgp_opcao`. Nos endpoints `blank_*_funcoes`, que são mistos (o mesmo caminho lê ou grava), a operação vai no campo `funcao`. Com `--rede`, o gravador observa as requisições enquanto o Ivson navega e produz o mapa (método, caminho, `nmgp_opcao`, `funcao`) que alimenta essas listas.
 
-**Como funciona.** Em cada aba ou iframe observado, o gravador envia `Network.enable` e processa só três eventos: `Network.requestWillBeSent`, `Network.responseReceived` e `Network.loadingFailed`. Os demais eventos de rede são ignorados, inclusive os que trazem cookies e cabeçalhos extras. Ao ligar o domínio, o gravador zera os buffers de conteúdo do Chrome para essa conexão. É só observação: nenhuma requisição é alterada, bloqueada ou repetida.
+**Como funciona.** Em cada aba ou iframe observado, o gravador envia `Network.enable` (nas abas novas, antes da primeira requisição; ver item 4.2) e processa só três eventos: `Network.requestWillBeSent`, `Network.responseReceived` e `Network.loadingFailed`. Os demais eventos de rede são ignorados, inclusive os que trazem cookies e cabeçalhos extras. Ao ligar o domínio, o gravador zera os buffers de conteúdo do Chrome para essa conexão. É só observação: nenhuma requisição é alterada, bloqueada ou repetida.
 
 **O que grava**, em `captures\rede-AAAA-MM-DD.jsonl` (uma linha JSON por evento):
 
@@ -108,7 +135,7 @@ python scripts\gravador_passivo.py --rede
 | `resposta` | horário, `requestId`, método, URL, tipo, status HTTP |
 | `falha` | horário, `requestId`, método, URL, tipo, erro de rede (`net::…`), se foi cancelada |
 
-Os valores de `nmgp_opcao` e de `funcao` são lidos da query string da URL e do corpo de POST `application/x-www-form-urlencoded` que já vem no próprio evento, todos do mesmo `requestWillBeSent`. Do corpo, **só os valores dessas duas chaves** são guardados; o resto é descartado na memória. Corpo JSON, multipart ou outro formato não é analisado: aparece só `tipo_corpo`. Um corpo form-urlencoded grande demais para vir no evento (mais de 64 KB) aparece com `corpo_fora_do_evento: true` e `funcao_fora_do_evento: true`: os valores do corpo ficam desconhecidos, e o gravador não vai buscá-lo. Em URLs `data:` fica só o tipo, sem o conteúdo.
+Os valores de `nmgp_opcao` e de `funcao` são lidos da query string da URL e do corpo de POST `application/x-www-form-urlencoded` que já vem no próprio evento, todos do mesmo `requestWillBeSent`. Do corpo, **só os valores dessas duas chaves** são guardados; o resto é descartado na memória. Corpo JSON, multipart ou outro formato não é analisado: aparece só `tipo_corpo`. Um corpo form-urlencoded grande demais para vir no evento (XHR/fetch acima de 64 KB; nos POSTs de navegação o Chrome manda o corpo inteiro, ver item 4.2) aparece com `corpo_fora_do_evento: true` e `funcao_fora_do_evento: true`: os valores do corpo ficam desconhecidos, e o gravador não vai buscá-lo. Em URLs `data:` fica só o tipo, sem o conteúdo.
 
 **O que NUNCA grava:** corpo de requisição (fora os valores de `nmgp_opcao` e `funcao`), corpo de resposta, cabeçalhos, cookies. O gravador não envia `Network.getResponseBody`, `Network.getRequestPostData` nem qualquer outro comando que busque conteúdo. Todos são recusados pela lista de comandos permitidos.
 
