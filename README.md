@@ -52,6 +52,20 @@ No MD, o caminho de leitura passa ao lado de ações de escrita e de assinatura.
 
 As listas ficam em `fluxo_exames/guard.py` (versão 2, preenchida com as sessões das Etapas B e C; evidências em `docs/FASE-0-ETAPA-B.md` e `docs/FASE-0-ETAPA-C.md`). Além das 3 camadas, a guarda bloqueia, em qualquer método, endpoints de escrita, assinatura, impressão e log e parâmetros de operação do ScriptCase. Abrir o formulário do laudo (`nmgp_opcao=igual`) foi validado na Etapa C e está liberado só nesse caminho. O PDF do laudo ("Imprimir") e os formulários de Resultado e de Evolução continuam bloqueados.
 
+## Coletor (F1)
+
+`fluxo_exames/coletor.py` lê o MD **só por CDP**, no Chrome dedicado já aberto e logado (`http://localhost:9222`). Não abre navegador próprio e não usa o perfil pessoal. As operações são as do mapa: `ler_agenda`, `localizar_paciente`, `abrir_ficha`, `identidade`, `listar_atendimentos`, `listar_laudos` e `abrir_texto_laudo`. A guarda é integrada nas 3 camadas:
+
+1. operação e clique precisam estar nas listas do mapa;
+2. uma rota de rede aborta o que `guard.py` nega; um canário prova que ela está ativa;
+3. há interdição dos textos de escrita e assinatura.
+
+Qualquer verificação que falhe levanta `ColetorBloqueado`, e nada é tentado no lugar. `fluxo_exames/fila.py` guarda a fila de itens em `%LOCALAPPDATA%\FluxoExames\fila.db`, com a máquina de estados de `state.py`, checkpoints por documento e idempotência por (paciente, exame, data).
+
+**Testes (offline):** `python -m pytest`. Os testes do coletor abrem um Chrome descartável (perfil temporário, headless) contra um servidor sintético local (`tests/md_sintetico.py`) e conferem do lado do servidor que nenhuma requisição negada pela guarda chegou. Nada acessa o MD. Se não houver Chrome, esses testes são pulados; `FLUXO_CHROME` aponta outro executável.
+
+**Validação ao vivo:** sessão separada com o Ivson, com o gravador passivo como testemunha. Roteiro, premissas a confirmar e riscos residuais em `docs/FASE-1-ETAPA-A.md`, seções 4 e 5.
+
 ## Privacidade
 
 - **Nenhum dado de paciente entra neste repositório:** nem nomes, prontuários, laudos, capturas ou HTML real. Testes usam apenas fixtures sintéticas ou anonimizadas.
@@ -63,19 +77,25 @@ As listas ficam em `fluxo_exames/guard.py` (versão 2, preenchida com as sessõe
 ## Estrutura
 
 ```
-fluxo_exames/        pacote do app (esqueleto)
+fluxo_exames/        pacote do app
   guard.py           guarda de somente leitura (versão 2)
-  state.py           estados da máquina de estados por item
+  coletor.py         coletor do MD por CDP, com a guarda integrada (F1, validado só offline)
+  fila.py            fila persistente em SQLite, checkpoints por documento
+  state.py           estados e transições da máquina de estados por item
 scripts/
   gravador_passivo.py  Fase 0: grava passivamente as navegações do Chrome dedicado
                        (--rede: mapa de requisições por método, caminho, nmgp_opcao e funcao)
   repassar_rede.py     repassa um rede-*.jsonl gravado pela guarda (sem acessar o MD)
 tests/
   test_guard.py      testes da guarda (dados sintéticos)
+  test_coletor.py    coletor contra o servidor sintético, num Chrome descartável
+  test_fila.py       fila e máquina de estados, inclusive retomada após queda
+  md_sintetico.py    servidor local que imita a estrutura do MD (sem PHI)
 docs/
   FASE-0-ETAPA-A.md  perfil dedicado, uso do gravador e checklist da Etapa B
   FASE-0-ETAPA-B.md  mapa de leitura do MD e classificação dos POSTs (sessões B e C)
   FASE-0-ETAPA-C.md  relatório da sessão 2: lacunas, guarda v2, pendências e recomendações
+  FASE-1-ETAPA-A.md  coletor e fila: desenho, testes, riscos e roteiro da validação ao vivo
 ```
 
 Testes: `python -m pytest`.
@@ -86,4 +106,4 @@ Testes: `python -m pytest`.
 python -m pip install -r requirements.txt
 ```
 
-O gravador da Fase 0 usa apenas `websocket-client`. O `playwright` entra a partir da F2.
+O gravador da Fase 0 usa apenas `websocket-client`. O coletor usa o `playwright` só para conectar por CDP; o Chromium do Playwright não é necessário (`playwright install` é opcional, só como alternativa ao Chrome instalado nos testes).

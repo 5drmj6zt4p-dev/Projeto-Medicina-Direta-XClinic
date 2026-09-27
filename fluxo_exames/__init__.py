@@ -1,6 +1,7 @@
 """fluxo-exames: preparo diário determinístico de exames (Medicina Direta + XClinic).
 
-Esqueleto da Fase 0. Nenhum módulo deste pacote acessa o Medicina Direta ainda.
+F1, etapa A: coletor (``coletor.py``) e fila (``fila.py``) testados só contra um
+servidor sintético. O coletor ainda não foi validado no Medicina Direta real.
 """
 
 __version__ = "0.0.1"
